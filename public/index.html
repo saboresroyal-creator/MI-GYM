@@ -564,8 +564,139 @@ function openExerciseDetail(id){
 }
 
 /* =========================================================
-   RUTINAS
+   RUTINAS AUTOMÁTICAS POR GRUPO MUSCULAR
+   Plantillas basadas en guías actuales de entrenamiento de fuerza
+   (compuestos primero, 3-4 series, 6-12 reps para hipertrofia).
    ========================================================= */
+const BODY_PART_LABELS = {
+  chest:'Pecho', back:'Espalda', 'upper legs':'Piernas (cuádriceps/glúteo)', 'lower legs':'Pantorrillas',
+  shoulders:'Hombros', 'upper arms':'Brazos', 'lower arms':'Antebrazos', waist:'Abdomen/Core',
+  cardio:'Cardio', neck:'Cuello',
+};
+const AUTO_ROUTINE_TEMPLATES = {
+  chest: [
+    {keywords:['barbell bench press','bench press'], sets:4, reps:'6-10'},
+    {keywords:['incline dumbbell press','incline bench press','incline barbell press'], sets:3, reps:'8-12'},
+    {keywords:['decline bench press','decline dumbbell press'], sets:3, reps:'8-12'},
+    {keywords:['dip','chest dip'], sets:3, reps:'8-12'},
+    {keywords:['cable fly','pec deck','dumbbell fly'], sets:3, reps:'10-15'},
+    {keywords:['push-up','push up'], sets:3, reps:'12-20'},
+  ],
+  back: [
+    {keywords:['deadlift'], sets:4, reps:'5-8'},
+    {keywords:['pull-up','pull up','lat pulldown'], sets:4, reps:'6-10'},
+    {keywords:['barbell bent over row','bent over row'], sets:3, reps:'8-12'},
+    {keywords:['seated cable row'], sets:3, reps:'10-12'},
+    {keywords:['one arm dumbbell row','dumbbell row'], sets:3, reps:'10-12'},
+    {keywords:['face pull'], sets:3, reps:'12-15'},
+    {keywords:['straight arm pulldown'], sets:3, reps:'12-15'},
+  ],
+  'upper legs': [
+    {keywords:['barbell full squat','squat (barbell)','back squat','squat'], sets:4, reps:'6-10'},
+    {keywords:['romanian deadlift','stiff leg deadlift'], sets:3, reps:'8-12'},
+    {keywords:['leg press'], sets:3, reps:'10-12'},
+    {keywords:['walking lunge','lunge'], sets:3, reps:'10-12'},
+    {keywords:['leg extension'], sets:3, reps:'12-15'},
+    {keywords:['lying leg curl','seated leg curl','leg curl'], sets:3, reps:'12-15'},
+    {keywords:['hip thrust','glute bridge'], sets:3, reps:'10-15'},
+  ],
+  'lower legs': [
+    {keywords:['standing calf raise'], sets:4, reps:'10-15'},
+    {keywords:['seated calf raise'], sets:3, reps:'12-15'},
+    {keywords:['calf press'], sets:3, reps:'12-15'},
+  ],
+  shoulders: [
+    {keywords:['barbell shoulder press','overhead press','military press','shoulder press'], sets:4, reps:'6-10'},
+    {keywords:['arnold press'], sets:3, reps:'8-12'},
+    {keywords:['lateral raise'], sets:3, reps:'12-15'},
+    {keywords:['front raise'], sets:2, reps:'12-15'},
+    {keywords:['rear delt','reverse fly'], sets:3, reps:'12-15'},
+    {keywords:['upright row'], sets:3, reps:'10-12'},
+  ],
+  'upper arms': [
+    {keywords:['barbell curl'], sets:3, reps:'8-12'},
+    {keywords:['dumbbell curl'], sets:3, reps:'10-12'},
+    {keywords:['hammer curl'], sets:3, reps:'10-12'},
+    {keywords:['close-grip bench press','close grip bench press'], sets:3, reps:'8-12'},
+    {keywords:['triceps pushdown','tricep pushdown','pushdown'], sets:3, reps:'10-12'},
+    {keywords:['skullcrusher','skull crusher','lying triceps extension'], sets:3, reps:'8-12'},
+    {keywords:['overhead triceps extension'], sets:3, reps:'10-12'},
+  ],
+  'lower arms': [
+    {keywords:['wrist curl'], sets:3, reps:'12-15'},
+    {keywords:['reverse wrist curl','wrist extension'], sets:3, reps:'12-15'},
+    {keywords:['reverse curl'], sets:3, reps:'10-12'},
+  ],
+  waist: [
+    {keywords:['plank'], sets:3, reps:'30-60s'},
+    {keywords:['hanging leg raise','leg raise'], sets:3, reps:'10-15'},
+    {keywords:['cable crunch','crunch'], sets:3, reps:'15-20'},
+    {keywords:['russian twist'], sets:3, reps:'15-20'},
+    {keywords:['side plank'], sets:3, reps:'30-45s'},
+    {keywords:['bicycle crunch'], sets:3, reps:'15-20'},
+  ],
+  cardio: [
+    {keywords:['jumping jack'], sets:3, reps:'45 seg'},
+    {keywords:['high knee'], sets:3, reps:'30 seg'},
+    {keywords:['mountain climber'], sets:3, reps:'30 seg'},
+    {keywords:['burpee'], sets:3, reps:'12-15'},
+    {keywords:['jump rope'], sets:3, reps:'1 min'},
+    {keywords:['jump squat'], sets:3, reps:'12-15'},
+    {keywords:['stationary bike','cycling'], sets:1, reps:'15-20 min'},
+    {keywords:['treadmill','running'], sets:1, reps:'15-20 min'},
+  ],
+  neck: [
+    {keywords:['neck curl'], sets:3, reps:'12-15'},
+    {keywords:['neck extension'], sets:3, reps:'12-15'},
+    {keywords:['neck lateral flexion','neck side'], sets:3, reps:'12-15'},
+  ],
+};
+function exercisesForBodyPart(bodyPart){ return state.exercises.filter(ex=>exBodyParts(ex).includes(bodyPart)); }
+function findExerciseByKeywords(keywords, bodyPart){
+  const pool = exercisesForBodyPart(bodyPart);
+  const searchIn = pool.length ? pool : state.exercises;
+  for(const kw of keywords){
+    const found = searchIn.find(ex=>(ex.name||'').toLowerCase().includes(kw));
+    if(found) return found;
+  }
+  return null;
+}
+function openAutoRoutinePicker(){
+  if(!state.exercisesLoaded){
+    toast('Cargando biblioteca de ejercicios...', 'ok');
+    loadExercises().then(()=>{ if(state.exercisesLoaded) openAutoRoutinePicker(); });
+    return;
+  }
+  const parts = Object.keys(AUTO_ROUTINE_TEMPLATES).filter(p=>exercisesForBodyPart(p).length>0);
+  if(parts.length===0){ toast('No hay ejercicios cargados todavía', 'err'); return; }
+  openModal('¿Qué querés trabajar?', `
+    <div style="padding:0 16px 4px; display:flex; flex-wrap:wrap; gap:8px;">
+      ${parts.map(p=>`<button class="chip" style="cursor:pointer;" onclick="generateAutoRoutine('${jsq(p)}')">${escapeHtml(BODY_PART_LABELS[p]||p)}</button>`).join('')}
+    </div>
+  `);
+}
+function generateAutoRoutine(bodyPart){
+  const template = AUTO_ROUTINE_TEMPLATES[bodyPart] || [];
+  const usedIds = new Set();
+  const picked = [];
+  template.forEach(slot=>{
+    const ex = findExerciseByKeywords(slot.keywords, bodyPart);
+    const id = ex ? String(ex.id||ex.name) : null;
+    if(ex && !usedIds.has(id)){
+      usedIds.add(id);
+      picked.push({exercise_id:id, exercise_name:ex.name, target_sets:slot.sets, target_reps:slot.reps});
+    }
+  });
+  if(picked.length===0){
+    exercisesForBodyPart(bodyPart).slice(0,6).forEach(ex=>{
+      picked.push({exercise_id:String(ex.id||ex.name), exercise_name:ex.name, target_sets:3, target_reps:'8-12'});
+    });
+  }
+  if(picked.length===0){ toast('No encontramos ejercicios para ese grupo muscular', 'err'); return; }
+  routineDraft = {name:'Día de '+(BODY_PART_LABELS[bodyPart]||bodyPart), exercises:picked};
+  renderRoutineDraftModal();
+}
+
 async function loadRoutines(){
   const rows = await supaFetch('/routines?user_id=eq.'+session.user.id+'&select=*,routine_exercises(*)&order=created_at.desc', 'GET');
   state.routines = (rows||[]).map(r=>Object.assign({}, r, {
@@ -576,8 +707,11 @@ function renderRoutines(){
   return `
   <div class="screen">
     <div class="topbar"><h1>Rutinas</h1></div>
+    <div style="padding:0 16px 14px; display:flex; gap:8px;">
+      <button class="btn-secondary btn-block" onclick="openAutoRoutinePicker()">${ic('fire')} Armar según grupo muscular</button>
+    </div>
     <div style="padding:0 16px 14px;">
-      <button class="btn btn-block" onclick="openCreateRoutineModal()">${ic('plus')} Nueva rutina</button>
+      <button class="btn btn-block" onclick="openCreateRoutineModal()">${ic('plus')} Nueva rutina manual</button>
     </div>
     ${state.routines.length===0 ? `<div class="empty-state">${ic('dumbbell')}<p>Todavía no creaste ninguna rutina.</p></div>` :
       state.routines.map(r=>`
