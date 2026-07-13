@@ -702,6 +702,208 @@ function generateAutoRoutine(bodyPart){
   renderRoutineDraftModal();
 }
 
+/* =========================================================
+   PLAN PERSONALIZADO
+   Wizard de preguntas + rutina periodizada (varía cada 4 semanas)
+   + plan de alimentación por comida.
+   ========================================================= */
+const EXPERIENCE_LABELS = { beginner:'Principiante', intermediate:'Intermedio', advanced:'Avanzado' };
+const EQUIPMENT_LABELS = { gym:'Gimnasio completo', home_dumbbells:'Casa con mancuernas', bodyweight:'Solo peso corporal' };
+const SPLIT_LABELS = {
+  full_body:'Full Body', upper:'Tren superior', lower:'Tren inferior', push:'Empuje (Push)',
+  pull:'Tracción (Pull)', legs:'Piernas', chest:'Pecho', back:'Espalda', shoulders:'Hombros', arms_core:'Brazos y Core',
+};
+const SPLIT_DAY_MUSCLES = {
+  full_body: [{bp:'upper legs',n:2},{bp:'chest',n:1},{bp:'back',n:1},{bp:'shoulders',n:1},{bp:'waist',n:1}],
+  upper: [{bp:'chest',n:2},{bp:'back',n:2},{bp:'shoulders',n:1},{bp:'upper arms',n:1}],
+  lower: [{bp:'upper legs',n:3},{bp:'lower legs',n:1},{bp:'waist',n:1}],
+  push: [{bp:'chest',n:2},{bp:'shoulders',n:1},{bp:'upper arms',n:1}],
+  pull: [{bp:'back',n:2},{bp:'upper arms',n:1},{bp:'lower arms',n:1}],
+  legs: [{bp:'upper legs',n:3},{bp:'lower legs',n:1}],
+  chest: [{bp:'chest',n:4},{bp:'upper arms',n:1}],
+  back: [{bp:'back',n:4},{bp:'upper arms',n:1}],
+  shoulders: [{bp:'shoulders',n:3},{bp:'waist',n:1}],
+  arms_core: [{bp:'upper arms',n:2},{bp:'lower arms',n:1},{bp:'waist',n:2}],
+};
+const WEEKDAY_TRAINING_PATTERNS = {
+  2:[0,3], 3:[0,2,4], 4:[0,1,3,4], 5:[0,1,2,3,4], 6:[0,1,2,3,4,5],
+};
+const PROGRAM_PHASES = [
+  {key:'volumen', label:'Volumen / Hipertrofia', sets:null, reps:null, cardioFinisher:false},
+  {key:'fuerza', label:'Fuerza', sets:5, reps:'4-6', cardioFinisher:false},
+  {key:'definicion', label:'Definición / Resistencia', sets:3, reps:'15-20', cardioFinisher:true},
+];
+function computeWeeklySplit(daysPerWeek, experience){
+  if(daysPerWeek<=2) return ['full_body','full_body'];
+  if(daysPerWeek===3) return experience==='beginner' ? ['full_body','full_body','full_body'] : ['push','pull','legs'];
+  if(daysPerWeek===4) return ['upper','lower','upper','lower'];
+  if(daysPerWeek===5) return ['chest','back','legs','shoulders','arms_core'];
+  return ['push','pull','legs','push','pull','legs'];
+}
+function computeProgramWeek(startedAt){
+  const start = new Date(startedAt);
+  const days = Math.floor((Date.now()-start.getTime())/86400000);
+  return Math.max(1, Math.floor(days/7)+1);
+}
+function computeProgramPhase(weekNumber){
+  const block = Math.floor((weekNumber-1)/4);
+  return Object.assign({block}, PROGRAM_PHASES[block % PROGRAM_PHASES.length]);
+}
+function pickExercisesForBodyPart(bodyPart, n, rotationOffset){
+  const template = AUTO_ROUTINE_TEMPLATES[bodyPart] || [];
+  if(template.length===0) return [];
+  const off = rotationOffset % template.length;
+  const rotated = template.slice(off).concat(template.slice(0, off));
+  const used = new Set();
+  const picked = [];
+  for(const slot of rotated){
+    if(picked.length>=n) break;
+    const ex = findExerciseByKeywords(slot.keywords, bodyPart);
+    const id = ex ? String(ex.id||ex.name) : null;
+    if(ex && !used.has(id)){ used.add(id); picked.push({ex, slot}); }
+  }
+  return picked;
+}
+function generateTodayRoutine(profile){
+  if(!profile || !profile.days_per_week || !profile.program_started_at) return null;
+  const daysPerWeek = profile.days_per_week;
+  const experience = profile.experience_level || 'intermediate';
+  const pattern = WEEKDAY_TRAINING_PATTERNS[daysPerWeek] || WEEKDAY_TRAINING_PATTERNS[3];
+  const dow = (new Date().getDay()+6)%7;
+  const slotIdx = pattern.indexOf(dow);
+  const weekNumber = computeProgramWeek(profile.program_started_at);
+  const phase = computeProgramPhase(weekNumber);
+  if(slotIdx===-1) return {isRestDay:true, weekNumber, phase};
+  const split = computeWeeklySplit(daysPerWeek, experience);
+  const splitKey = split[slotIdx % split.length];
+  const muscles = SPLIT_DAY_MUSCLES[splitKey] || [];
+  const exercises = [];
+  muscles.forEach(m=>{
+    pickExercisesForBodyPart(m.bp, m.n, phase.block).forEach(({ex,slot})=>{
+      exercises.push({
+        exercise_id:String(ex.id||ex.name), exercise_name:ex.name,
+        target_sets: phase.sets || slot.sets, target_reps: phase.reps || slot.reps,
+      });
+    });
+  });
+  if(phase.cardioFinisher){
+    pickExercisesForBodyPart('cardio', 2, phase.block).forEach(({ex,slot})=>{
+      exercises.push({exercise_id:String(ex.id||ex.name), exercise_name:ex.name, target_sets:slot.sets, target_reps:slot.reps});
+    });
+  }
+  return {isRestDay:false, weekNumber, phase, splitKey, exercises};
+}
+async function startTodayPlanSession(){
+  if(!state.exercisesLoaded){ toast('Cargando biblioteca de ejercicios, esperá un segundo...', 'ok'); await loadExercises(); }
+  const todayPlan = generateTodayRoutine(state.profile);
+  if(!todayPlan || todayPlan.isRestDay || !todayPlan.exercises.length){ toast('Hoy es día de descanso según tu plan', 'ok'); return; }
+  try{
+    const [routine] = await supaFetch('/routines', 'POST', {user_id:session.user.id, name:(SPLIT_LABELS[todayPlan.splitKey]||'Entrenamiento')+' · Semana '+todayPlan.weekNumber});
+    const rows = todayPlan.exercises.map((e,i)=>Object.assign({routine_id:routine.id, order_index:i}, e));
+    await supaFetch('/routine_exercises', 'POST', rows);
+    await loadRoutines();
+    await startSession(routine.id);
+  }catch(e){ toast(e.message, 'err'); }
+}
+const MEAL_SPLIT = [
+  {label:'Desayuno', pct:0.25}, {label:'Almuerzo', pct:0.35}, {label:'Merienda', pct:0.15}, {label:'Cena', pct:0.25},
+];
+function computeMealPlan(dietPlan){
+  if(!dietPlan) return [];
+  return MEAL_SPLIT.map(m=>({
+    label:m.label,
+    calories:Math.round(dietPlan.calories*m.pct),
+    proteinG:Math.round(dietPlan.proteinG*m.pct),
+    carbsG:Math.round(dietPlan.carbsG*m.pct),
+    fatG:Math.round(dietPlan.fatG*m.pct),
+  }));
+}
+let planWizard = null;
+const PLAN_WIZARD_STEPS = ['goal','body','experience','days','equipment'];
+function openPlanWizard(){
+  const p = state.profile || {};
+  planWizard = {
+    step:0,
+    goal: p.goal || 'maintain',
+    experience: p.experience_level || 'intermediate',
+    days_per_week: p.days_per_week || 3,
+    equipment: p.equipment || 'gym',
+    sex: p.sex || 'm',
+    birth_date: p.birth_date || '',
+    height_cm: p.height_cm || '',
+    weight_kg: p.weight_kg || '',
+    activity_level: p.activity_level || 'moderate',
+  };
+  renderPlanWizardStep();
+}
+function renderPlanWizardStep(){
+  const step = PLAN_WIZARD_STEPS[planWizard.step];
+  let body = '';
+  if(step==='goal'){
+    body = `<p style="padding:0 16px; color:var(--muted); font-size:13px;">¿Cuál es tu objetivo principal?</p>
+    <div class="seg">${Object.entries(GOAL_META).map(([k,v])=>`<button class="${planWizard.goal===k?'active':''}" onclick="planWizard.goal='${k}'; renderPlanWizardStep();">${v.label}</button>`).join('')}</div>`;
+  } else if(step==='body'){
+    body = `
+    <div class="form-group"><label>Sexo</label>
+      <select id="pw-sex" onchange="planWizard.sex=this.value">
+        <option value="m" ${planWizard.sex==='m'?'selected':''}>Masculino</option>
+        <option value="f" ${planWizard.sex==='f'?'selected':''}>Femenino</option>
+      </select>
+    </div>
+    <div class="form-group"><label>Fecha de nacimiento</label><input type="date" id="pw-birth" value="${planWizard.birth_date}" onchange="planWizard.birth_date=this.value"></div>
+    <div class="form-group"><label>Altura (cm)</label><input type="number" id="pw-height" value="${planWizard.height_cm}" onchange="planWizard.height_cm=this.value" placeholder="Ej: 175"></div>
+    <div class="form-group"><label>Peso actual (kg)</label><input type="number" step="0.1" id="pw-weight" value="${planWizard.weight_kg}" onchange="planWizard.weight_kg=this.value" placeholder="Ej: 78.5"></div>
+    <div class="form-group"><label>Actividad diaria (fuera del gym)</label>
+      <select id="pw-activity" onchange="planWizard.activity_level=this.value">
+        ${Object.entries(ACTIVITY_FACTORS).map(([k,v])=>`<option value="${k}" ${planWizard.activity_level===k?'selected':''}>${v.label}</option>`).join('')}
+      </select>
+    </div>`;
+  } else if(step==='experience'){
+    body = `<p style="padding:0 16px; color:var(--muted); font-size:13px;">¿Tu nivel de experiencia entrenando?</p>
+    <div class="seg">${Object.entries(EXPERIENCE_LABELS).map(([k,v])=>`<button class="${planWizard.experience===k?'active':''}" onclick="planWizard.experience='${k}'; renderPlanWizardStep();">${v}</button>`).join('')}</div>`;
+  } else if(step==='days'){
+    body = `<p style="padding:0 16px; color:var(--muted); font-size:13px;">¿Cuántos días por semana podés entrenar?</p>
+    <div class="seg">${[2,3,4,5,6].map(n=>`<button class="${planWizard.days_per_week===n?'active':''}" onclick="planWizard.days_per_week=${n}; renderPlanWizardStep();">${n} días</button>`).join('')}</div>`;
+  } else if(step==='equipment'){
+    body = `<p style="padding:0 16px; color:var(--muted); font-size:13px;">¿Dónde vas a entrenar?</p>
+    <div class="seg">${Object.entries(EQUIPMENT_LABELS).map(([k,v])=>`<button class="${planWizard.equipment===k?'active':''}" onclick="planWizard.equipment='${k}'; renderPlanWizardStep();">${v}</button>`).join('')}</div>`;
+  }
+  const isLast = planWizard.step === PLAN_WIZARD_STEPS.length-1;
+  openModal('Crear mi plan ('+(planWizard.step+1)+'/'+PLAN_WIZARD_STEPS.length+')', `
+    ${body}
+    <div style="padding:14px 16px 0; display:flex; gap:8px;">
+      ${planWizard.step>0 ? `<button class="btn-secondary" style="flex:1;" onclick="planWizard.step--; renderPlanWizardStep();">Atrás</button>` : ''}
+      <button class="btn" style="flex:2;" onclick="${isLast?'submitPlanWizard()':'advancePlanWizard()'}">${isLast?'Crear mi plan':'Siguiente'}</button>
+    </div>
+  `);
+}
+function advancePlanWizard(){
+  if(PLAN_WIZARD_STEPS[planWizard.step]==='body'){
+    if(!planWizard.birth_date || !planWizard.height_cm || !planWizard.weight_kg){
+      toast('Completá fecha de nacimiento, altura y peso', 'err'); return;
+    }
+  }
+  planWizard.step++;
+  renderPlanWizardStep();
+}
+async function submitPlanWizard(){
+  const data = {
+    sex: planWizard.sex, birth_date: planWizard.birth_date,
+    height_cm: Number(planWizard.height_cm)||null, weight_kg: Number(planWizard.weight_kg)||null,
+    activity_level: planWizard.activity_level, goal: planWizard.goal,
+    experience_level: planWizard.experience, days_per_week: planWizard.days_per_week,
+    equipment: planWizard.equipment,
+    program_started_at: (state.profile && state.profile.program_started_at) || new Date().toISOString(),
+  };
+  try{
+    state.profile = await upsertProfile(data).then(r=>r[0]||data);
+    closeModal();
+    toast('¡Tu plan está listo!', 'ok');
+    if(!state.exercisesLoaded) loadExercises().then(renderInPlace);
+    nav('home');
+  }catch(e){ toast(e.message, 'err'); }
+}
+
 async function loadRoutines(){
   const rows = await supaFetch('/routines?user_id=eq.'+session.user.id+'&select=*,routine_exercises(*)&order=created_at.desc', 'GET');
   state.routines = (rows||[]).map(r=>Object.assign({}, r, {
@@ -917,15 +1119,18 @@ async function finishSession(){
 function renderHome(){
   const plan = computeDietPlan(state.profile);
   const lastWeight = state.weightLogs[state.weightLogs.length-1];
+  const hasFullPlan = !!(state.profile && state.profile.days_per_week && state.profile.program_started_at);
+  const todayPlan = hasFullPlan ? generateTodayRoutine(state.profile) : null;
+  const meals = plan ? computeMealPlan(plan) : [];
   return `
   <div class="screen">
     <div class="topbar"><h1>${state.displayName ? 'Hola, '+escapeHtml(state.displayName) : 'Mi Gym'}</h1></div>
 
     ${!plan ? `
       <div class="card">
-        <h3>Completá tu perfil</h3>
-        <p style="font-size:13px; color:var(--muted); margin:6px 0 12px;">Cargá tus datos para calcular tus calorías y macros personalizados.</p>
-        <button class="btn btn-block" onclick="nav('profile')">Cargar mis datos</button>
+        <h3>Creá tu plan personalizado</h3>
+        <p style="font-size:13px; color:var(--muted); margin:6px 0 12px;">Contestá unas preguntas y armamos tu rutina y tu alimentación.</p>
+        <button class="btn btn-block" onclick="openPlanWizard()">Empezar</button>
       </div>
     ` : `
       <div class="card">
@@ -936,11 +1141,31 @@ function renderHome(){
           <div class="macro-pill"><div class="val">${plan.carbsG}g</div><div class="lbl">Carbos</div></div>
           <div class="macro-pill"><div class="val">${plan.fatG}g</div><div class="lbl">Grasas</div></div>
         </div>
+        ${meals.length ? `
+          <div class="row" style="margin-top:10px; flex-wrap:wrap; gap:8px;">
+            ${meals.map(m=>`<div class="macro-pill" style="flex:1; min-width:70px;"><div class="val">${m.calories}</div><div class="lbl">${m.label}</div></div>`).join('')}
+          </div>
+        ` : ''}
         <div style="text-align:right; margin-top:10px;">
-          <button class="btn-secondary btn-sm" onclick="nav('profile')">Editar datos</button>
+          <button class="btn-secondary btn-sm" onclick="openPlanWizard()">${hasFullPlan ? 'Ajustar mi plan' : 'Crear plan de entrenamiento'}</button>
         </div>
       </div>
     `}
+
+    ${hasFullPlan ? `
+      <div class="card">
+        <h3>${ic('dumbbell')} Entrenamiento de hoy</h3>
+        ${!todayPlan || todayPlan.isRestDay ? `
+          <p style="font-size:13px; color:var(--muted); margin:6px 0;">Hoy es día de descanso según tu plan${todayPlan ? ' (Semana '+todayPlan.weekNumber+', '+todayPlan.phase.label+')' : ''}.</p>
+        ` : `
+          <p style="font-size:12px; color:var(--muted); margin:0 0 8px;">Semana ${todayPlan.weekNumber} · ${todayPlan.phase.label} · ${SPLIT_LABELS[todayPlan.splitKey]||''}</p>
+          <ul style="margin:0 0 12px; padding-left:18px; font-size:13px;">
+            ${todayPlan.exercises.map(e=>`<li>${escapeHtml(e.exercise_name)} — ${e.target_sets}x${e.target_reps}</li>`).join('')}
+          </ul>
+          <button class="btn btn-block" onclick="startTodayPlanSession()">Empezar entrenamiento de hoy</button>
+        `}
+      </div>
+    ` : ''}
 
     <div class="card">
       <div class="row">
@@ -1009,7 +1234,11 @@ function renderScreen(){
     case 'progress': return renderProgress();
     case 'profile': return renderProfileForm();
     case 'home':
-    default: return renderHome();
+    default:
+      if(!state.exercisesLoaded && state.profile && state.profile.days_per_week && state.profile.program_started_at){
+        loadExercises().then(()=>{ if(state.route.screen==='home') renderInPlace(); });
+      }
+      return renderHome();
   }
 }
 function renderWelcome(){
