@@ -90,12 +90,9 @@ button{font-family:inherit;}
 .set-check{width:32px; height:32px; border-radius:9px; border:1px solid var(--glass-bd); background:var(--glass); color:var(--white); display:flex; align-items:center; justify-content:center;}
 .set-check.done{background:var(--ok); border-color:var(--ok); color:#052e17;}
 
-.auth-wrap{min-height:100vh; display:flex; flex-direction:column; justify-content:center; padding:32px 24px;}
-.auth-wrap h1{font-size:26px; margin:0 0 4px; text-align:center;}
-.auth-wrap p.sub{text-align:center; color:var(--muted); font-size:13px; margin:0 0 28px;}
-.auth-tabs{display:flex; gap:6px; margin-bottom:18px; background:var(--glass); border-radius:12px; padding:4px;}
-.auth-tabs button{flex:1; background:none; border:none; color:var(--muted); padding:9px; border-radius:9px; font-size:13px; font-weight:700;}
-.auth-tabs button.active{background:var(--accent); color:#fff;}
+.welcome-wrap{min-height:100vh; display:flex; flex-direction:column; justify-content:center; padding:32px 24px;}
+.welcome-wrap h1{font-size:26px; margin:0 0 4px; text-align:center;}
+.welcome-wrap p.sub{text-align:center; color:var(--muted); font-size:13px; margin:0 0 28px;}
 .toast{position:fixed; bottom:96px; left:50%; transform:translateX(-50%); background:#1e2027; border:1px solid var(--glass-bd); color:var(--white);
   padding:11px 18px; border-radius:12px; font-size:13px; z-index:400; max-width:88%; text-align:center; box-shadow:0 6px 24px rgba(0,0,0,0.4);}
 .toast.err{border-color:rgba(255,90,90,0.4); color:#ff8a8a;}
@@ -119,6 +116,7 @@ const EXERCISES_GIF_BASE = 'https://raw.githubusercontent.com/mohamedatef90/exer
 const EXERCISES_CACHE_KEY = 'gymapp_exercises_cache_v1';
 
 const SESSION_KEY = 'gymapp_session';
+const NAME_KEY = 'gymapp_display_name';
 
 /* =========================================================
    ICONS
@@ -169,26 +167,17 @@ async function authRequest(grantType, body){
   if(!res.ok) throw new Error(data.error_description || data.msg || 'No se pudo autenticar');
   return data;
 }
-async function signUp(email, password){
+async function signInAnonymously(){
   const res = await fetch(SUPABASE_URL + '/auth/v1/signup', {
     method:'POST',
     headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY},
-    body: JSON.stringify({email, password}),
+    body: JSON.stringify({data:{}}),
   });
   const data = await res.json().catch(()=>({}));
-  if(!res.ok) throw new Error(data.error_description || data.msg || 'No se pudo crear la cuenta');
-  if(data.access_token) saveSession(data);
-  return data;
-}
-async function signIn(email, password){
-  const data = await authRequest('password', {email, password});
+  if(!res.ok) throw new Error(data.error_description || data.msg || 'No se pudo iniciar sesión');
+  if(!data.access_token) throw new Error('Habilitá "Anonymous sign-ins" en Supabase (Authentication > Providers)');
   saveSession(data);
   return data;
-}
-async function signOut(){
-  saveSession(null);
-  state.route = {screen:'home'};
-  render();
 }
 async function ensureFreshSession(){
   if(!session) return null;
@@ -202,6 +191,12 @@ async function ensureFreshSession(){
     saveSession(null);
     return null;
   }
+}
+function loadDisplayName(){
+  try{ return localStorage.getItem(NAME_KEY) || ''; }catch(e){ return ''; }
+}
+function saveDisplayName(name){
+  try{ localStorage.setItem(NAME_KEY, name); }catch(e){}
 }
 async function supaFetch(path, method, body){
   await ensureFreshSession();
@@ -237,6 +232,7 @@ let state = {
   exercises: [],
   exercisesLoaded: false,
   exerciseFilter: {q:'', bodyPart:null},
+  displayName: '',
 };
 let toastTimer = null;
 function toast(msg, kind){
@@ -784,7 +780,7 @@ function renderHome(){
   const lastWeight = state.weightLogs[state.weightLogs.length-1];
   return `
   <div class="screen">
-    <div class="topbar"><h1>Mi Gym</h1></div>
+    <div class="topbar"><h1>${state.displayName ? 'Hola, '+escapeHtml(state.displayName) : 'Mi Gym'}</h1></div>
 
     ${!plan ? `
       <div class="card">
@@ -844,52 +840,6 @@ function openModal(title, bodyHtml){
 function closeModal(){ const el = document.getElementById('modal-overlay'); if(el) el.remove(); }
 
 /* =========================================================
-   AUTENTICACIÓN
-   ========================================================= */
-let authMode = 'signin';
-function renderAuth(){
-  return `
-  <div class="auth-wrap">
-    <h1>🏋️ Mi Gym</h1>
-    <p class="sub">Rutinas, ejercicios animados y tu dieta personalizada</p>
-    <div class="auth-tabs">
-      <button class="${authMode==='signin'?'active':''}" onclick="authMode='signin'; renderInPlace();">Ingresar</button>
-      <button class="${authMode==='signup'?'active':''}" onclick="authMode='signup'; renderInPlace();">Crear cuenta</button>
-    </div>
-    <div class="form-group"><label>Email</label><input type="email" id="auth-email" placeholder="vos@email.com"></div>
-    <div class="form-group"><label>Contraseña</label><input type="password" id="auth-pass" placeholder="••••••••"></div>
-    <div style="padding:6px 16px 0;">
-      <button class="btn btn-block" onclick="submitAuth()">${authMode==='signin'?'Ingresar':'Crear cuenta'}</button>
-    </div>
-  </div>`;
-}
-async function submitAuth(){
-  const email = document.getElementById('auth-email').value.trim();
-  const pass = document.getElementById('auth-pass').value;
-  if(!email || !pass){ toast('Completá email y contraseña', 'err'); return; }
-  try{
-    if(authMode==='signin'){
-      await signIn(email, pass);
-    } else {
-      const data = await signUp(email, pass);
-      if(!data.access_token){
-        toast('Cuenta creada — revisá tu email para confirmarla y después ingresá', 'ok');
-        authMode = 'signin';
-        renderInPlace();
-        return;
-      }
-    }
-    await bootstrapAfterAuth();
-  }catch(e){ toast(e.message, 'err'); }
-}
-async function bootstrapAfterAuth(){
-  document.getElementById('app').innerHTML = `<div class="spinner"></div>`;
-  await Promise.all([loadProfile(), loadWeightLogs(), loadRoutines()]);
-  loadExercises().then(renderInPlace);
-  nav('home');
-}
-
-/* =========================================================
    NAV / RENDER
    ========================================================= */
 const NAV_ITEMS = [
@@ -923,8 +873,27 @@ function renderScreen(){
     default: return renderHome();
   }
 }
+function renderWelcome(){
+  return `
+  <div class="welcome-wrap">
+    <h1>🏋️ Mi Gym</h1>
+    <p class="sub">¿Cómo te llamás?</p>
+    <div class="form-group"><input id="welcome-name" placeholder="Tu nombre" autofocus></div>
+    <div style="padding:6px 16px 0;">
+      <button class="btn btn-block" onclick="submitWelcomeName()">Entrar</button>
+    </div>
+  </div>`;
+}
+function submitWelcomeName(){
+  const name = document.getElementById('welcome-name').value.trim();
+  if(!name){ toast('Escribí tu nombre', 'err'); return; }
+  state.displayName = name;
+  saveDisplayName(name);
+  render();
+}
 function render(){
-  if(!session){ document.getElementById('app').innerHTML = renderAuth(); return; }
+  if(!session){ document.getElementById('app').innerHTML = `<div class="spinner"></div>`; return; }
+  if(!state.displayName){ document.getElementById('app').innerHTML = renderWelcome(); return; }
   const showNav = state.route.screen !== 'session';
   document.getElementById('app').innerHTML = renderScreen() + (showNav ? renderBottomNav() : '');
 }
@@ -935,15 +904,19 @@ function renderInPlace(){ render(); }
    ========================================================= */
 (async function init(){
   loadSession();
+  state.displayName = loadDisplayName();
+  let fresh = session ? await ensureFreshSession() : null;
+  if(!fresh){
+    document.getElementById('app').innerHTML = `<div class="spinner"></div>`;
+    try{ await signInAnonymously(); }
+    catch(e){ toast(e.message, 'err'); }
+  }
   if(session){
-    const fresh = await ensureFreshSession();
-    if(fresh){
-      document.getElementById('app').innerHTML = `<div class="spinner"></div>`;
-      try{
-        await Promise.all([loadProfile(), loadWeightLogs(), loadRoutines()]);
-      }catch(e){ /* sesión inválida u otro error de red */ }
-      loadExercises().then(renderInPlace);
-    }
+    document.getElementById('app').innerHTML = `<div class="spinner"></div>`;
+    try{
+      await Promise.all([loadProfile(), loadWeightLogs(), loadRoutines()]);
+    }catch(e){ /* error de red */ }
+    loadExercises().then(renderInPlace);
   }
   render();
 })();
